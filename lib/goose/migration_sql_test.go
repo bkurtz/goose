@@ -86,6 +86,35 @@ func TestSplitStatements(t *testing.T) {
 	}
 }
 
+func TestUseTransactions(t *testing.T) {
+	type testData struct {
+		fileName        string
+		useTransactions bool
+	}
+
+	tests := []testData{
+		{
+			fileName:        "./db-sample/migrations/001_create_users_table.sql",
+			useTransactions: true,
+		},
+		{
+			fileName:        "./db-sample/migrations/002_next.sql",
+			useTransactions: true,
+		},
+		{
+			fileName:        "./db-sample/migrations/003_no_transaction.sql",
+			useTransactions: false,
+		},
+	}
+
+	for _, test := range tests {
+		result := useTransactions(test.fileName)
+		if result != test.useTransactions {
+			t.Errorf("Failed transaction check. got %v, want %v", result, test.useTransactions)
+		}
+	}
+}
+
 var functxt = `-- +goose Up
 CREATE TABLE IF NOT EXISTS histories (
   id                BIGSERIAL  PRIMARY KEY,

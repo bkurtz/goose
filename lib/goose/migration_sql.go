@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -127,6 +128,29 @@ func splitSQLStatements(r io.Reader, direction bool) (stmts []string) {
 	return
 }
 
+func useTransactions(scriptFile string) bool {
+	f, err := os.Open(scriptFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	noTransactionsRegex, _ := regexp.Compile("--\\s\\+goose\\sNO\\sTRANSACTION")
+
+	scanner := bufio.NewScanner(f)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if noTransactionsRegex.MatchString(line) {
+			f.Close()
+			return false
+		}
+	}
+
+	f.Close()
+	return true
+}
+
 // Run a migration specified in raw SQL.
 //
 // Sections of the script can be annotated with a special comment,
@@ -136,15 +160,36 @@ func splitSQLStatements(r io.Reader, direction bool) (stmts []string) {
 // All statements following an Up or Down directive are grouped together
 // until another direction directive is found.
 func runSQLMigration(conf *DBConf, db *sql.DB, scriptFile string, v int64, direction bool) error {
-
-	txn, err := db.Begin()
-	if err != nil {
-		log.Fatal("db.Begin:", err)
-	}
+	filePath := filepath.Base(scriptFile)
+	useTx := useTransactions(scriptFile)
 
 	f, err := os.Open(scriptFile)
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	if useTx {
+		err := runMigrationInTransaction(conf, db, f, v, direction, filePath)
+		if err != nil {
+			log.Fatalf("FAIL (tx) %s (%v), quitting migration.", filePath, err)
+		}
+	} else {
+		err = runMigrationWithoutTransaction(conf, db, f, v, direction, filePath)
+		if err != nil {
+			log.Fatalf("FAIL (no tx) %s (%v), quitting migration.", filePath, err)
+		}
+	}
+
+	f.Close()
+
+	return nil
+}
+
+func runMigrationInTransaction(conf *DBConf, db *sql.DB, r io.Reader, v int64, direction bool, filePath string) error {
+
+	txn, err := db.Begin()
+	if err != nil {
+		log.Fatal("db.Begin:", err)
 	}
 
 	// find each statement, checking annotations for up/down direction
@@ -152,16 +197,31 @@ func runSQLMigration(conf *DBConf, db *sql.DB, scriptFile string, v int64, direc
 	// Commits the transaction if successfully applied each statement and
 	// records the version into the version table or returns an error and
 	// rolls back the transaction.
-	for _, query := range splitSQLStatements(f, direction) {
+	for _, query := range splitSQLStatements(r, direction) {
 		if _, err = txn.Exec(query); err != nil {
 			txn.Rollback()
-			log.Fatalf("FAIL %s (%v), quitting migration.", filepath.Base(scriptFile), err)
+			log.Fatalf("FAIL %s (%v), quitting migration.", filePath, err)
 			return err
 		}
 	}
 
-	if err = FinalizeMigration(conf, txn, direction, v); err != nil {
-		log.Fatalf("error finalizing migration %s, quitting. (%v)", filepath.Base(scriptFile), err)
+	if err = FinalizeMigrationTx(conf, txn, direction, v); err != nil {
+		log.Fatalf("error finalizing migration %s, quitting. (%v)", filePath, err)
+	}
+
+	return nil
+}
+func runMigrationWithoutTransaction(conf *DBConf, db *sql.DB, r io.Reader, v int64, direction bool, filePath string) error {
+	// find each statement, checking annotations for up/down direction
+	// Tecords the version into the version table or returns an error
+	for _, query := range splitSQLStatements(r, direction) {
+		if _, err := db.Exec(query); err != nil {
+			return err
+		}
+	}
+
+	if err := FinalizeMigration(conf, db, direction, v); err != nil {
+		log.Fatalf("error finalizing migration %s, quitting. (%v)", filePath, err)
 	}
 
 	return nil
